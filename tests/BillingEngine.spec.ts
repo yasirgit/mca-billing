@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { AdvanceDto } from "../src/api/BillingApiClient";
+import { NetworkError, type AdvanceDto } from "../src/api/BillingApiClient";
 import { AdvanceState } from "../src/domain/AdvanceState";
 import { Metrics } from "../src/infrastructure/Metrics";
 import { BalanceCalculator } from "../src/services/BalanceCalculator";
@@ -104,6 +104,18 @@ describe("BillingEngine", () => {
     await engine.runBilling("2022-01-03");
     await engine.runBilling("2022-01-03");
     expect(api.successfulCharges.map((c) => c.amount)).toEqual(["10.00"]);
+  });
+
+  it("dead-letters ambiguous billing_complete network failures", async () => {
+    api.advancesByDay = () => [dto()];
+    api.setRevenue(1, "2022-01-02", "200.00"); // settles in one run
+    api.completeHook = () =>
+      new NetworkError("/advances/1/billing_complete", "ECONNRESET");
+
+    await engine.runBilling("2022-01-03");
+    expect(store.getAdvance(1)!.state).toBe(AdvanceState.Repaid);
+    expect(store.deadLetters()).toHaveLength(1);
+    expect(store.deadLetters()[0]!.operation).toBe("billing_complete");
   });
 
   it("survives an advance-sync failure and keeps billing known advances", async () => {

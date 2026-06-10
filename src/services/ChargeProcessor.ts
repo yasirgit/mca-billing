@@ -35,7 +35,9 @@ export class ChargeProcessor {
   async processCharges(today: IsoDate): Promise<void> {
     for (const advance of this.store.allAdvances()) {
       if (advance.state !== AdvanceState.Active) continue;
-      await this.drainAdvance(advance, today);
+      await this.withAdvanceLock(advance.id, `charge:${today}`, () =>
+        this.drainAdvance(advance, today),
+      );
     }
     this.metrics.gauge("charge_backlog_depth", this.store.chargeBacklogDepth());
   }
@@ -68,7 +70,8 @@ export class ChargeProcessor {
       const idempotencyKey = chargeIdempotencyKey(
         advance.id,
         item.sourceRevenueDate,
-        item.id,
+        item.amount.toString(),
+        item.createdOn,
         item.attempts,
       );
 
@@ -207,6 +210,24 @@ export class ChargeProcessor {
           .reduce((sum, i) => sum.add(i.amount), Money.zero())
           .toString(),
       });
+    }
+  }
+
+  private async withAdvanceLock<T>(
+    advanceId: number,
+    owner: string,
+    fn: () => Promise<T>,
+  ): Promise<T | undefined> {
+    if (!this.store.tryAcquireAdvanceRun(advanceId, owner)) {
+      this.logger.warn("charge_processing_skipped_already_in_progress", {
+        advanceId,
+      });
+      return undefined;
+    }
+    try {
+      return await fn();
+    } finally {
+      this.store.releaseAdvanceRun(advanceId, owner);
     }
   }
 }

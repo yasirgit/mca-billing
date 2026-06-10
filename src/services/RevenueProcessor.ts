@@ -17,6 +17,8 @@ import { BalanceCalculator } from "./BalanceCalculator";
  * never be billed twice.
  */
 export class RevenueProcessor {
+  private readonly runOwnerPrefix = "revenue";
+
   constructor(
     private readonly api: BillingApiClient,
     private readonly store: StateStore,
@@ -28,7 +30,7 @@ export class RevenueProcessor {
     for (const advance of this.store.allAdvances()) {
       if (advance.state !== AdvanceState.Active) continue;
       if (compareDates(today, advance.repaymentStartDate) < 0) continue;
-      await this.processAdvance(advance, today);
+      await this.withAdvanceLock(advance.id, today, () => this.processAdvance(advance, today));
     }
     this.metrics.gauge("revenue_backlog_depth", this.store.revenueBacklogDepth());
   }
@@ -131,5 +133,25 @@ export class RevenueProcessor {
       customerId: advance.customerId,
       revenueDate,
     });
+  }
+
+  private async withAdvanceLock<T>(
+    advanceId: number,
+    today: IsoDate,
+    fn: () => Promise<T>,
+  ): Promise<T | undefined> {
+    const owner = `${this.runOwnerPrefix}:${today}`;
+    if (!this.store.tryAcquireAdvanceRun(advanceId, owner)) {
+      this.logger.warn("revenue_processing_skipped_already_in_progress", {
+        today,
+        advanceId,
+      });
+      return undefined;
+    }
+    try {
+      return await fn();
+    } finally {
+      this.store.releaseAdvanceRun(advanceId, owner);
+    }
   }
 }

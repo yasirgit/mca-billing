@@ -75,6 +75,10 @@ export interface StateStore {
     attempts: number,
   ): DeadLetterItem;
   deadLetters(): DeadLetterItem[];
+
+  // Lightweight run-ownership guard (single-process safety seam).
+  tryAcquireAdvanceRun(advanceId: number, owner: string): boolean;
+  releaseAdvanceRun(advanceId: number, owner: string): void;
 }
 
 export class InMemoryStateStore implements StateStore {
@@ -84,6 +88,7 @@ export class InMemoryStateStore implements StateStore {
   private readonly chargeBacklog = new Map<number, ChargeBacklogItem[]>();
   private readonly ledgerByAdvance = new Map<number, ChargeLedgerEvent[]>();
   private readonly dlq: DeadLetterItem[] = [];
+  private readonly activeAdvanceRuns = new Map<number, string>();
   private nextChargeItemId = 1;
   private nextEventId = 1;
   private nextDlqId = 1;
@@ -259,6 +264,18 @@ export class InMemoryStateStore implements StateStore {
 
   deadLetters(): DeadLetterItem[] {
     return [...this.dlq];
+  }
+
+  tryAcquireAdvanceRun(advanceId: number, owner: string): boolean {
+    const existing = this.activeAdvanceRuns.get(advanceId);
+    if (existing && existing !== owner) return false;
+    this.activeAdvanceRuns.set(advanceId, owner);
+    return true;
+  }
+
+  releaseAdvanceRun(advanceId: number, owner: string): void {
+    const existing = this.activeAdvanceRuns.get(advanceId);
+    if (existing === owner) this.activeAdvanceRuns.delete(advanceId);
   }
 
   private buildChargeItem(params: NewChargeParams): ChargeBacklogItem {

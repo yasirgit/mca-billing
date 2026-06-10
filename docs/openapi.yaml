@@ -1,0 +1,291 @@
+openapi: 3.0.3
+info:
+  title: Wayflyer MCA Billing API
+  description: |
+    REST API for the Wayflyer Merchant Cash Advance billing exercise.
+
+    The passage of time is simulated: every request must include a
+    `Today: {yyyy-mm-dd}` header, and the API responds as though the request
+    was made on that day. The simulated period runs from `2022-01-01` to
+    `2022-02-01`.
+
+    There is a single global currency. All monetary amounts are encoded as
+    strings with two decimal places (e.g. `"12345.67"`).
+
+    Status code `530` is used as a domain-level "not possible yet" signal:
+    - on the revenues endpoint it means the revenue is not yet available
+      (bill it as soon as it becomes available);
+    - on the charge endpoint it means the charge was rejected (no money
+      moved; re-issue on a subsequent day).
+  version: 2.0.0
+servers:
+  - url: https://billing.eng-test.wayflyer.com/v2
+
+# The exercise API requires no authentication.
+security: []
+
+tags:
+  - name: Advances
+    description: Advances issued to customers and their billing lifecycle
+  - name: Revenues
+    description: Daily customer revenue used to compute repayments
+  - name: Charges
+    description: Direct debit charges issued against mandates
+
+paths:
+  /advances:
+    get:
+      tags: [Advances]
+      operationId: getAdvances
+      summary: Fetch all advances issued to customers
+      description: |
+        Returns every advance visible on the simulated day. New advances are
+        created regularly as customers sign up and existing customers receive
+        additional advances, so this must be re-fetched each day.
+      parameters:
+        - $ref: '#/components/parameters/TodayHeader'
+      responses:
+        '200':
+          description: All advances visible on the simulated day.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvancesResponse'
+              example:
+                advances:
+                  - id: 1001
+                    customer_id: 1
+                    created: '2022-01-02'
+                    total_advanced: '60000.00'
+                    fee: '2000.00'
+                    mandate_id: 102
+                    repayment_start_date: '2022-01-07'
+                    repayment_percentage: 11
+
+  /customers/{id}/revenues/{for_date}:
+    get:
+      tags: [Revenues]
+      operationId: getCustomerRevenue
+      summary: Retrieve the revenue for a given customer for a given date
+      description: |
+        Due to problems with third-party systems, a customer's revenue for a
+        given day may not be available until a later day (status `530`). In
+        that case the customer should be billed as soon as the revenue
+        becomes available, unless the advance has otherwise been fully
+        repaid.
+      parameters:
+        - $ref: '#/components/parameters/TodayHeader'
+        - name: id
+          in: path
+          required: true
+          description: The unique identifier for the customer.
+          schema:
+            type: integer
+          example: 1
+        - name: for_date
+          in: path
+          required: true
+          description: The date the revenue was received by the customer.
+          schema:
+            type: string
+            format: date
+          example: '2022-01-02'
+      responses:
+        '200':
+          description: The revenue received by the customer on `for_date`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevenueResponse'
+              example:
+                amount: '1234.56'
+        '530':
+          description: Revenue not yet available. Retry on a later day.
+
+  /mandates/{id}/charge:
+    post:
+      tags: [Charges]
+      operationId: chargeMandate
+      summary: Issue a repayment charge against a given mandate
+      description: |
+        Charges the given amount against the direct debit mandate.
+
+        Constraints:
+        - The total charges made against any **advance** must not exceed
+          `10000.00` on any given day; larger repayments must be split over
+          multiple days.
+        - Due to problems with the direct debit mandate, charges on a given
+          day may be rejected (status `530`). Rejected charges moved no
+          money and should be re-issued on subsequent days.
+      parameters:
+        - $ref: '#/components/parameters/TodayHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - name: id
+          in: path
+          required: true
+          description: The unique identifier for the mandate.
+          schema:
+            type: integer
+          example: 102
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+            example:
+              amount: '1234.56'
+      responses:
+        '200':
+          description: The charge was accepted.
+        '530':
+          description: >-
+            Charging not possible at this time. No money moved; re-issue the
+            charge on a subsequent day.
+
+  /advances/{id}/billing_complete:
+    post:
+      tags: [Advances]
+      operationId: billingComplete
+      summary: Indicate that billing has been completed for a given advance
+      description: |
+        Must be called once, following the successful final payment, when the
+        advance's `total_advanced` plus `fee` has been fully repaid.
+      parameters:
+        - $ref: '#/components/parameters/TodayHeader'
+        - name: id
+          in: path
+          required: true
+          description: The unique identifier for the advance.
+          schema:
+            type: integer
+          example: 1001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Empty JSON body.
+            example: {}
+      responses:
+        '200':
+          description: Billing completion acknowledged.
+
+components:
+  parameters:
+    TodayHeader:
+      name: Today
+      in: header
+      required: true
+      description: >-
+        The simulated current date. The API behaves as though the request was
+        made on this day.
+      schema:
+        type: string
+        format: date
+      example: '2022-01-02'
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        Client-generated deterministic key identifying one logical charge
+        attempt (sent by this solution's client; ready for an API that
+        enforces it to make charge creation exactly-once).
+      schema:
+        type: string
+      example: 'charge:1001:2022-01-06:42:0'
+
+  schemas:
+    MoneyAmount:
+      type: string
+      description: >-
+        Monetary amount in the single global currency, encoded as a string
+        with exactly two decimal places.
+      pattern: '^\d+\.\d{2}$'
+      example: '12345.67'
+
+    Advance:
+      type: object
+      required:
+        - id
+        - customer_id
+        - created
+        - total_advanced
+        - fee
+        - mandate_id
+        - repayment_start_date
+        - repayment_percentage
+      properties:
+        id:
+          type: integer
+          description: The unique identifier for each advance.
+          example: 1001
+        customer_id:
+          type: integer
+          description: The unique identifier for the customer this advance is for.
+          example: 1
+        created:
+          type: string
+          format: date
+          description: >-
+            The date the advance was agreed. This may be before repayment
+            starts.
+          example: '2022-01-02'
+        total_advanced:
+          allOf:
+            - $ref: '#/components/schemas/MoneyAmount'
+          description: The monetary amount advanced to the customer.
+        fee:
+          allOf:
+            - $ref: '#/components/schemas/MoneyAmount'
+          description: >-
+            The fee for this advance, to be paid back in addition to
+            `total_advanced`.
+        mandate_id:
+          type: integer
+          description: >-
+            The unique identifier of the direct debit mandate to charge this
+            advance with. Multiple advances may share a mandate.
+          example: 102
+        repayment_start_date:
+          type: string
+          format: date
+          description: >-
+            Repayments should start on this date, and continue every day
+            until the advance and fee have been repaid.
+          example: '2022-01-07'
+        repayment_percentage:
+          type: integer
+          description: The percentage of daily revenue that should be repaid.
+          minimum: 0
+          maximum: 100
+          example: 11
+
+    AdvancesResponse:
+      type: object
+      required: [advances]
+      properties:
+        advances:
+          type: array
+          items:
+            $ref: '#/components/schemas/Advance'
+
+    RevenueResponse:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/MoneyAmount'
+          description: The amount of revenue received.
+
+    ChargeRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/MoneyAmount'
+          description: The amount to charge against the given mandate.

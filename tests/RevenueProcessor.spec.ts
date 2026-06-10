@@ -125,4 +125,15 @@ describe("RevenueProcessor", () => {
     expect(store.revenueBacklogFor(1)).toHaveLength(0);
     expect(store.chargeBacklogFor(1)).toHaveLength(1);
   });
+
+  it("skips processing when the advance run lock is already held", async () => {
+    api.setRevenue(1, "2022-01-04", "500.00");
+    const owner = "external";
+    expect(store.tryAcquireAdvanceRun(advance.id, owner)).toBe(true);
+
+    await processor.processRevenues("2022-01-05");
+    expect(store.chargeBacklogFor(1)).toHaveLength(0);
+
+    store.releaseAdvanceRun(advance.id, owner);
+  });
 });

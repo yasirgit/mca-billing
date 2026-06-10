@@ -1,4 +1,8 @@
-import type { AdvanceDto, BillingApiClient } from "../api/BillingApiClient";
+import {
+  NetworkError,
+  type AdvanceDto,
+  type BillingApiClient,
+} from "../api/BillingApiClient";
 import { Advance } from "../domain/Advance";
 import { AdvanceState } from "../domain/AdvanceState";
 import type { Logger } from "../infrastructure/Logger";
@@ -84,6 +88,24 @@ export class BillingEngine {
             advanceId: advance.id,
           });
         } catch (error) {
+          if (error instanceof NetworkError) {
+            // Ambiguous completion outcome: preserve for reconciliation and keep
+            // the advance in REPAID so future runs can retry safely.
+            this.store.addDeadLetter(
+              "billing_complete",
+              { advanceId: advance.id },
+              String(error),
+              today,
+              1,
+            );
+            this.metrics.increment("dlq_added");
+            this.logger.error("billing_complete_ambiguous_dead_lettered", {
+              today,
+              advanceId: advance.id,
+              error: String(error),
+            });
+            continue;
+          }
           // Stays REPAID: retried on a later day; charging is already over.
           this.logger.error("billing_complete_failed", {
             today,

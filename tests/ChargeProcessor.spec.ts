@@ -150,6 +150,18 @@ describe("ChargeProcessor", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it("skips processing when the advance run lock is already held", async () => {
+    enqueue("500.00");
+    const owner = "external";
+    expect(store.tryAcquireAdvanceRun(advance.id, owner)).toBe(true);
+
+    await processor.processCharges("2022-01-05");
+    expect(api.chargeAttempts).toHaveLength(0);
+    expect(store.chargeBacklogFor(1)).toHaveLength(1);
+
+    store.releaseAdvanceRun(advance.id, owner);
+  });
+
   it("dead-letters ambiguous network failures instead of blind-retrying", async () => {
     enqueue("500.00");
     api.chargeHook = () => new NetworkError("/mandates/2/charge", "ECONNRESET");

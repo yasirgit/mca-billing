@@ -7,11 +7,26 @@ import {
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { fileURLToPath } from "url";
+import {
+  ApiStatusError,
+  NetworkError,
+  type BillingApiClient,
+} from "../api/BillingApiClient";
+import type { IsoDate } from "../utils/Dates";
+import { Money } from "../utils/Money";
 
 export interface DocsServerOptions {
   port: number;
-  /** Upstream billing API that /v2/* requests are proxied to. */
+  /** Upstream billing API used when no app client is wired in. */
   apiTarget: string;
+  /**
+   * When set, /v2/* is served through this client (HttpBillingApiClient +
+   * decorators) instead of a raw fetch proxy — breakpoints in the client
+   * and retry/circuit-breaker layers will hit on Swagger/curl traffic.
+   */
+  api?: BillingApiClient;
+  /** Runs one full billing day (sync → revenue → charge → complete). */
+  onRunBillingDay?: (today: IsoDate) => Promise<void>;
 }
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -31,8 +46,126 @@ async function readBody(req: IncomingMessage): Promise<Buffer | undefined> {
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  });
   res.end(JSON.stringify(body));
+}
+
+function headerValue(
+  req: IncomingMessage,
+  name: string,
+): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  if (value === undefined) return undefined;
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getTodayHeader(req: IncomingMessage): IsoDate | undefined {
+  return headerValue(req, "today") as IsoDate | undefined;
+}
+
+function sendApiError(res: ServerResponse, error: unknown): void {
+  if (error instanceof ApiStatusError) {
+    sendJson(res, error.status, {
+      error: "api_error",
+      endpoint: error.endpoint,
+      message: error.message,
+    });
+    return;
+  }
+  if (error instanceof NetworkError) {
+    sendJson(res, 502, {
+      error: "network_error",
+      endpoint: error.endpoint,
+      message: error.message,
+    });
+    return;
+  }
+  sendJson(res, 500, { error: "server_error", message: String(error) });
+}
+
+async function serveViaBillingClient(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  api: BillingApiClient,
+): Promise<void> {
+  const today = getTodayHeader(req);
+  if (!today) {
+    sendJson(res, 400, {
+      error: "missing_today_header",
+      message: "Set the Today header (yyyy-mm-dd).",
+    });
+    return;
+  }
+
+  try {
+    if (req.method === "GET" && pathname === "/advances") {
+      const advances = await api.getAdvances(today);
+      sendJson(res, 200, { advances });
+      return;
+    }
+
+    const revenueMatch = pathname.match(
+      /^\/customers\/(\d+)\/revenues\/(\d{4}-\d{2}-\d{2})$/,
+    );
+    if (req.method === "GET" && revenueMatch) {
+      const customerId = Number(revenueMatch[1]);
+      const forDate = revenueMatch[2] as IsoDate;
+      const result = await api.getRevenue(customerId, forDate, today);
+      if (result.kind === "unavailable") {
+        res.writeHead(530, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(JSON.stringify({ error: "revenue_not_available" }));
+        return;
+      }
+      sendJson(res, 200, { amount: result.amount.toString() });
+      return;
+    }
+
+    const chargeMatch = pathname.match(/^\/mandates\/(\d+)\/charge$/);
+    if (req.method === "POST" && chargeMatch) {
+      const body = await readBody(req);
+      const { amount } = JSON.parse((body ?? Buffer.from("{}")).toString()) as {
+        amount: string;
+      };
+      const idempotencyKey =
+        headerValue(req, "idempotency-key") ??
+        `swagger:${chargeMatch[1]}:${today}:${amount}`;
+      const outcome = await api.charge(
+        Number(chargeMatch[1]),
+        Money.of(amount),
+        today,
+        idempotencyKey,
+      );
+      if (outcome.kind === "rejected") {
+        res.writeHead(530, { "Access-Control-Allow-Origin": "*" });
+        res.end();
+        return;
+      }
+      sendJson(res, 200, {});
+      return;
+    }
+
+    const completeMatch = pathname.match(/^\/advances\/(\d+)\/billing_complete$/);
+    if (req.method === "POST" && completeMatch) {
+      await api.billingComplete(Number(completeMatch[1]), today);
+      sendJson(res, 200, {});
+      return;
+    }
+
+    res.writeHead(404, {
+      "Content-Type": "text/plain",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end("Not found");
+  } catch (error) {
+    sendApiError(res, error);
+  }
 }
 
 async function proxyApi(
@@ -81,7 +214,7 @@ async function serveOpenApi(res: ServerResponse, port: number): Promise<void> {
   const localServer = `http://localhost:${port}/v2`;
   const patched = raw.replace(
     /servers:\s*\n\s*- url: https:\/\/billing\.eng-test\.wayflyer\.com\/v2/,
-    `servers:\n  - url: ${localServer}\n    description: Local proxy for browser testing (forwards to the live API)\n  - url: https://billing.eng-test.wayflyer.com/v2\n    description: Live API (direct; may be blocked by CORS in the browser)`,
+    `servers:\n  - url: ${localServer}\n    description: Local app client (Swagger hits HttpBillingApiClient)\n  - url: https://billing.eng-test.wayflyer.com/v2\n    description: Live API (direct; may be blocked by CORS in the browser)`,
   );
   res.writeHead(200, {
     "Content-Type": "application/yaml",
@@ -135,12 +268,12 @@ function serveSwaggerUi(res: ServerResponse): void {
 }
 
 /**
- * Serves Swagger UI for docs/openapi.yaml plus a /v2 proxy to the live
- * billing API so the endpoints can be exercised from the browser without
- * CORS issues. Resolves once the server is listening.
+ * Serves Swagger UI for docs/openapi.yaml. When `api` is provided, /v2/*
+ * routes through the app's BillingApiClient; otherwise requests are proxied
+ * directly to `apiTarget`. Resolves once the server is listening.
  */
 export function startDocsServer(options: DocsServerOptions): Promise<Server> {
-  const { port, apiTarget } = options;
+  const { port, apiTarget, api, onRunBillingDay } = options;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -163,9 +296,31 @@ export function startDocsServer(options: DocsServerOptions): Promise<Server> {
         return;
       }
 
+      if (pathname === "/billing/run-day" && req.method === "POST") {
+        const today = getTodayHeader(req);
+        if (!today) {
+          sendJson(res, 400, {
+            error: "missing_today_header",
+            message: "Set the Today header (yyyy-mm-dd).",
+          });
+          return;
+        }
+        if (!onRunBillingDay) {
+          sendJson(res, 503, { error: "billing_engine_not_configured" });
+          return;
+        }
+        await onRunBillingDay(today);
+        sendJson(res, 200, { ok: true, today });
+        return;
+      }
+
       if (pathname === "/v2" || pathname.startsWith("/v2/")) {
         const apiPath = pathname.slice("/v2".length) || "/";
-        await proxyApi(req, res, `${apiPath}${url.search}`, apiTarget);
+        if (api) {
+          await serveViaBillingClient(req, res, apiPath, api);
+        } else {
+          await proxyApi(req, res, `${apiPath}${url.search}`, apiTarget);
+        }
         return;
       }
 

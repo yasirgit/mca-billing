@@ -19,18 +19,12 @@ const config = {
   endDate: process.env.END_DATE ?? "2022-02-01",
   logLevel: (process.env.LOG_LEVEL ?? "info") as LogLevel,
   docsPort: Number(process.env.DOCS_PORT ?? 3000),
+  skipSimulation: process.env.SKIP_SIMULATION === "1",
 };
 
 async function main(): Promise<void> {
   const logger = new Logger(config.logLevel);
   const metrics = new Metrics();
-
-  await startDocsServer({ port: config.docsPort, apiTarget: config.baseUrl });
-  logger.info("docs_server_started", {
-    swaggerUi: `http://localhost:${config.docsPort}/`,
-    openapiSpec: `http://localhost:${config.docsPort}/openapi.yaml`,
-    apiProxy: `http://localhost:${config.docsPort}/v2 -> ${config.baseUrl}`,
-  });
 
   const retryPolicy = new RetryPolicy({
     maxRetries: 3,
@@ -65,10 +59,33 @@ async function main(): Promise<void> {
     metrics,
   );
 
-  const simulator = new Simulator(engine, config.startDate, config.endDate, logger);
-  await simulator.run();
+  await startDocsServer({
+    port: config.docsPort,
+    apiTarget: config.baseUrl,
+    api,
+    onRunBillingDay: (today) => engine.runBilling(today),
+  });
+  logger.info("docs_server_started", {
+    swaggerUi: `http://localhost:${config.docsPort}/`,
+    openapiSpec: `http://localhost:${config.docsPort}/openapi.yaml`,
+    apiRoute: `http://localhost:${config.docsPort}/v2 -> HttpBillingApiClient -> ${config.baseUrl}`,
+    runBillingDay: `POST http://localhost:${config.docsPort}/billing/run-day (Today header)`,
+  });
 
-  new SimulationReporter(store, metrics).print();
+  if (!config.skipSimulation) {
+    const simulator = new Simulator(
+      engine,
+      config.startDate,
+      config.endDate,
+      logger,
+    );
+    await simulator.run();
+    new SimulationReporter(store, metrics).print();
+  } else {
+    logger.info("simulation_skipped", {
+      hint: "Use Swagger /v2/* or POST /billing/run-day to drive the engine",
+    });
+  }
 
   // The docs server keeps the process alive for browser testing.
   logger.info("docs_server_running", {

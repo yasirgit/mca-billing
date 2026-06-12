@@ -73,6 +73,9 @@ const CHARGE_NOT_POSSIBLE = 530;
 export class HttpBillingApiClient implements BillingApiClient {
   constructor(private readonly baseUrl: string) {}
 
+  // TODO: validate response payloads with a runtime schema (e.g. zod): bound
+  // repayment_percentage, reject negative amounts and malformed dates, rather
+  // than trusting the wire shape (acceptable here per the reliable-API assumption).
   async getAdvances(today: IsoDate): Promise<AdvanceDto[]> {
     const body = await this.request("GET", "/advances", today);
     return (JSON.parse(body) as { advances: AdvanceDto[] }).advances;

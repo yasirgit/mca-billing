@@ -12,7 +12,7 @@ Requires Node.js >= 20.
 ```bash
 npm install
 npm start          # runs the full simulation (2022-01-01 .. 2022-02-01)
-npm test           # runs the test suite (49 tests)
+npm test           # runs the test suite (49 tests, incl. a full end-to-end simulation)
 npm run typecheck  # strict TypeScript check
 ```
 
@@ -45,6 +45,23 @@ Simulator -> BillingEngine (per day)
                     cap split    -> remainder re-queued at head
                4. completion check     POST /advances/:id/billing_complete
                     ledger settled -> REPAID -> COMPLETED (exactly once)
+```
+
+The same daily cycle as a flowchart (renders on GitHub/GitLab):
+
+```mermaid
+flowchart TD
+    Sim[Simulator: each day] --> Sync[1. Sync advances]
+    Sync --> Rev[2. RevenueProcessor]
+    Rev -->|530 not ready| RB[RevenueBacklog<br/>retried daily]
+    Rev -->|200 amount| CB[ChargeBacklog<br/>repayment % of revenue]
+    RB -.-> Rev
+    CB --> Chg[3. ChargeProcessor<br/>clamp: min of amount, cap headroom, outstanding]
+    Chg -->|530 rejected| CB
+    Chg -->|success| Led[Append ChargeLedgerEvent - immutable]
+    Led --> Done{outstanding == 0?}
+    Done -->|yes| Comp[4. billing_complete<br/>REPAID -> COMPLETED, exactly once]
+    Done -->|no| Next[continue next day]
 ```
 
 Key decisions:

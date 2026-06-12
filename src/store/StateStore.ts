@@ -27,6 +27,9 @@ export interface NewLedgerEventParams {
  * Persistence port for all billing state. The in-memory implementation below
  * satisfies the assignment; a PostgreSQL/Redis/Kafka implementation would
  * sit behind this same interface without touching the services.
+ *
+ * TODO: production impl: PostgreSQL with UNIQUE(advance_id, revenue_date) for
+ * idempotency and the ledger as an append-only table (see README migration table).
  */
 export interface StateStore {
   // Advances

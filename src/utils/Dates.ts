@@ -1,4 +1,9 @@
-/** ISO calendar date, `yyyy-mm-dd`. Lexicographic order == chronological order. */
+/**
+ * ISO calendar date, `yyyy-mm-dd`. Lexicographic order == chronological order.
+ *
+ * TODO: brand this type (e.g. `string & { __isoDate: true }`) so arbitrary
+ * strings can't silently flow in as dates.
+ */
 export type IsoDate = string;
 
 export function addDays(date: IsoDate, days: number): IsoDate {

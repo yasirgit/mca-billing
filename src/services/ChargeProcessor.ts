@@ -164,6 +164,9 @@ export class ChargeProcessor {
     if (error instanceof NetworkError) {
       // Ambiguous outcome: the charge may have landed. Never blind-retry —
       // park for manual reconciliation.
+      // TODO: production would auto-reconcile instead of parking: query the
+      // provider by idempotency key to learn whether the charge landed, then
+      // settle or re-queue.
       this.store.removeChargeItem(advance.id, item.id);
       this.store.addDeadLetter(
         "charge",

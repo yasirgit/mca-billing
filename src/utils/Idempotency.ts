@@ -8,6 +8,9 @@ import type { IsoDate } from "./Dates";
  * - `attempt` distinguishes business re-issues across days (a 530-rejected
  *   charge transferred no money, so its next-day re-issue is a new logical
  *   attempt), while staying stable across in-call transport retries.
+ *
+ * TODO: in production the key must be persisted with the charge intent so it
+ * survives restarts; in-memory item ids only guarantee uniqueness within one run.
  */
 export function chargeIdempotencyKey(
   advanceId: number,

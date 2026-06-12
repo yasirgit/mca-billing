@@ -17,6 +17,10 @@ import type { RevenueProcessor } from "./RevenueProcessor";
  *   2. fetch due revenues and enqueue repayments  (RevenueProcessor)
  *   3. drain charge backlogs under cap and clamp  (ChargeProcessor)
  *   4. settle completions: REPAID -> billing_complete -> COMPLETED
+ *
+ * TODO: advances are processed sequentially; production would shard
+ * per-advance work across workers with per-advance ordering and a durable
+ * run checkpoint.
  */
 export class BillingEngine {
   constructor(
